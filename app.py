@@ -1,5 +1,6 @@
 import pandas as pd
 import string
+import re
 import nltk
 import joblib
 import os
@@ -10,61 +11,134 @@ from sklearn.naive_bayes import MultinomialNB
 import streamlit as st
 from deep_translator import GoogleTranslator
 
-# Garante que os dados do NLTK estão disponíveis (necessário em deploys novos)
 nltk.download('stopwords', quiet=True)
 nltk.download('punkt', quiet=True)
 nltk.download('punkt_tab', quiet=True)
 
-# Aqui foi definido o titulo da aba do navegador ecentralizou o conteudo, em seguida verifica se a imagem 
-# ibmrexiste e carrega
 st.set_page_config(page_title="Detector de SPAM - IA", page_icon="🤖", layout="centered")
 
+st.markdown("""
+<style>
+    /* Layout base */
+    .block-container {
+        padding-top: 1.5rem;
+        padding-bottom: 2rem;
+        max-width: 760px;
+    }
+
+    /* Cabeçalho */
+    .app-title {
+        text-align: center;
+        font-size: clamp(1.4rem, 4vw, 2rem);
+        font-weight: 800;
+        margin-bottom: 0.25rem;
+    }
+    .app-subtitle {
+        text-align: center;
+        font-size: clamp(0.8rem, 2vw, 0.95rem);
+        color: #888;
+        margin-bottom: 1.5rem;
+    }
+
+    /* Card de info do grupo */
+    .info-card {
+        background: #1e1e2e;
+        border: 1px solid #333;
+        border-radius: 12px;
+        padding: 1rem 1.5rem;
+        margin-bottom: 1.5rem;
+        font-size: clamp(0.8rem, 2vw, 0.92rem);
+        line-height: 1.9;
+    }
+    .info-card p { margin: 0; }
+
+    /* Barra de progresso */
+    div[data-testid="stProgress"] > div {
+        border-radius: 8px;
+        height: 22px !important;
+    }
+
+    /* Boxes de resultado */
+    div[data-testid="stAlert"] {
+        border-radius: 10px;
+        font-size: 0.97rem;
+    }
+
+    /* Botão principal — largura total */
+    div[data-testid="stButton"] > button[kind="primary"] {
+        width: 100%;
+        padding: 0.65rem;
+        font-size: 1rem;
+        font-weight: 700;
+        border-radius: 8px;
+        letter-spacing: 0.03em;
+    }
+
+    /* Textarea */
+    textarea {
+        border-radius: 8px !important;
+        font-size: 0.95rem !important;
+    }
+
+    hr { border-color: #333; margin: 1.2rem 0; }
+</style>
+""", unsafe_allow_html=True)
+
+# ── Cabeçalho ────────────────────────────────────────────────────────────────
 if os.path.exists("IBMR.jpg"):
     st.image("IBMR.jpg", use_container_width=True)
 
-# esse comando é para permitir colocar codigo html e css direto no python
-# nomes do grupo edo professor
-st.markdown("<h1 style='text-align: center;'>🤖 Detector de SPAM com Inteligência Artificial</h1>", unsafe_allow_html=True)
+st.markdown("<div class='app-title'>🤖 Detector de SPAM com Inteligência Artificial</div>", unsafe_allow_html=True)
+st.markdown("<div class='app-subtitle'>Classificação em tempo real usando Naive Bayes + TF-IDF</div>", unsafe_allow_html=True)
 
 st.markdown("""
-<div style='text-align: center; margin-top: 10px; margin-bottom: 20px;'>
-    <h3 style='margin-bottom: 15px;'><b>Trabalho A3 — UC Inteligência Artificial</b></h3>
-    <p style='margin: 4px 0; font-size: 16px;'><b>Professor:</b> Rogério Bailly / 2026-1</p>
-    <p style='margin: 4px 0; font-size: 16px;'><b>Curso:</b> Ciência da Computação</p>
-    <p style='margin: 4px 0; font-size: 16px;'><b>Grupo:</b> Caio  Campos / Pedro Gomes/ Rafael Couto/ Victor César Corrêa</p>
+<div class='info-card'>
+    <p><strong>Trabalho A3 — UC Inteligência Artificial</strong></p>
+    <p><strong>Professor:</strong> Rogério Bailly &nbsp;|&nbsp; 2026-1</p>
+    <p><strong>Curso:</strong> Ciência da Computação</p>
+    <p><strong>Grupo:</strong> Caio Campos · Pedro Gomes · Rafael Couto · Victor César Corrêa</p>
 </div>
 """, unsafe_allow_html=True)
 
 st.markdown("---")
 
+# ── Regras de padrões (executadas antes do ML) ────────────────────────────────
+_PADROES_SPAM = [
+    r'(ganhou|premiado|selecionado).{0,30}(prêmio|brinde|vale|voucher)',
+    r'clique\s+(aqui|no\s+link)',
+    r'(grátis|gratuito).{0,20}(acesso|curso|ebook)',
+    r'\bpix\b.{0,20}(ganhe|receba|resgate)',
+    r'(whatsapp|zap).{0,20}(clique|acesse)',
+    r'https?://\S+\.(xyz|top|click|online)',
+]
 
-# Aqui colocamos o pipeline de treinamento do (carrega o dataset, limpa o texto, aplica
-# TF-IDF e treina o Naive Bayes)
+def _detectar_por_regras(texto: str) -> bool:
+    t = texto.lower()
+    return any(re.search(p, t) for p in _PADROES_SPAM)
+
+# ── Modelo ────────────────────────────────────────────────────────────────────
 MODEL_PATH = 'model.pkl'
 VECTORIZER_PATH = 'vectorizer.pkl'
 
-def limpar_texto(texto):
+def _limpar_texto(texto: str) -> str:
     texto = texto.lower()
-    texto = "".join([char for char in texto if char not in string.punctuation])
+    texto = "".join(c for c in texto if c not in string.punctuation)
     palavras = nltk.word_tokenize(texto)
-    return " ".join([p for p in palavras if p not in stopwords.words('english')])
+    return " ".join(p for p in palavras if p not in stopwords.words('english'))
 
 @st.cache_resource
 def inicializar_e_treinar_ia():
-    # Carrega do disco se já foi treinado antes (evita re-treinar a cada restart local)
     if os.path.exists(MODEL_PATH) and os.path.exists(VECTORIZER_PATH):
-        modelo = joblib.load(MODEL_PATH)
-        vetorizador = joblib.load(VECTORIZER_PATH)
-        return modelo, vetorizador
+        return joblib.load(MODEL_PATH), joblib.load(VECTORIZER_PATH)
 
-    df = pd.read_csv('spam.csv', encoding='latin-1')
-    df = df[['v1', 'v2']]
+    df = pd.read_csv('spam.csv', encoding='latin-1')[['v1', 'v2']]
     df.columns = ['label', 'texto']
     df['label'] = df['label'].map({'ham': 0, 'spam': 1})
+    df['texto_limpo'] = df['texto'].apply(_limpar_texto)
 
-    df['texto_limpo'] = df['texto'].apply(limpar_texto)
-    X_treino, _, y_treino, _ = train_test_split(df['texto_limpo'], df['label'], test_size=0.2, random_state=42)
-
+    X_treino, _, y_treino, _ = train_test_split(
+        df['texto_limpo'], df['label'], test_size=0.2, random_state=42
+    )
     vetorizador = TfidfVectorizer()
     X_treino_vetorizado = vetorizador.fit_transform(X_treino)
 
@@ -73,40 +147,65 @@ def inicializar_e_treinar_ia():
 
     joblib.dump(modelo, MODEL_PATH)
     joblib.dump(vetorizador, VECTORIZER_PATH)
-
     return modelo, vetorizador
 
 modelo_ia, vetorizador = inicializar_e_treinar_ia()
 
+THRESHOLD_SPAM = 0.35
+THRESHOLD_SUSPEITO = 0.20
 
-# Criar a caixa de texto para escrever a mensagem e o botão para ativar o codigo de analise
-st.subheader("✉️ Analisador de Mensagens ")
-mensagem_usuario = st.text_area("Cole ou digite o texto do e-mail aqui:", height=150, 
-                                placeholder="Ex: GANHOU! Você foi selecionado para receber um prêmio...")
+# ── Interface de análise ──────────────────────────────────────────────────────
+st.subheader("✉️ Analisador de Mensagens")
+
+mensagem_usuario = st.text_area(
+    "Cole ou digite o texto da mensagem aqui:",
+    height=150,
+    placeholder="Ex: GANHOU! Você foi selecionado para receber um prêmio exclusivo. Clique aqui!",
+)
 
 if st.button("Analisar Mensagem", type="primary"):
-    if mensagem_usuario.strip() == "":
-        st.warning("⚠️ Por favor, digite uma mensagem para que a IA possa analisar.")
+    if not mensagem_usuario.strip():
+        st.warning("Por favor, digite uma mensagem para que a IA possa analisar.")
     else:
-        with st.spinner("A IA está analisando o contexto da mensagem..."):
+        with st.spinner("Analisando o contexto da mensagem..."):
             try:
-                # Traduz automaticamente de qualquer idioma para o inglês
-                texto_traduzido = GoogleTranslator(source='auto', target='en').translate(mensagem_usuario)
-                
-                # Passa o texto traduzido pelo pipeline da IA
-                msg_limpa = limpar_texto(texto_traduzido)
-                msg_vetorizada = vetorizador.transform([msg_limpa])
-                predicao = modelo_ia.predict(msg_vetorizada)[0]
-                
-                # Exibe o resultado
                 st.markdown("### Resultado da Avaliação:")
-                if predicao == 1:
-                    st.error("🚨 **SPAM DETECTADO!** Esta mensagem possui alto risco de ser uma fraude, phishing ou propaganda abusiva.")
+
+                # Camada 1 — regras de padrões clássicos
+                if _detectar_por_regras(mensagem_usuario):
+                    st.progress(1.0, text="Probabilidade de SPAM: 100% (padrão clássico detectado)")
+                    st.error(
+                        "🚨 **SPAM DETECTADO!**  \n"
+                        "Padrão típico de fraude, phishing ou propaganda abusiva identificado pelas regras do sistema."
+                    )
+                    st.caption("Classificado por detecção de padrões (regex) — sem necessidade de processar pelo modelo ML.")
+
+                # Camada 2 — Naive Bayes com threshold ajustado
                 else:
-                    st.success("🍏 **MENSAGEM CONFIÁVEL (HAM).** O modelo identificou padrões de uma comunicação legítima e segura.")
-                    
-                # Nota de rodapé acadêmica mostrando a tradução em tempo real
-                st.caption(f"**Nota técnica (Tradução em tempo real para o modelo):** *\"{texto_traduzido}\"*")
-                
+                    texto_traduzido = GoogleTranslator(source='auto', target='en').translate(mensagem_usuario)
+                    msg_limpa = _limpar_texto(texto_traduzido)
+                    msg_vetorizada = vetorizador.transform([msg_limpa])
+                    prob_spam = float(modelo_ia.predict_proba(msg_vetorizada)[0][1])
+
+                    st.progress(prob_spam, text=f"Probabilidade de SPAM: {prob_spam:.1%}")
+
+                    if prob_spam >= THRESHOLD_SPAM:
+                        st.error(
+                            "🚨 **SPAM DETECTADO!**  \n"
+                            "A IA identificou alto risco — esta mensagem apresenta padrões de fraude, phishing ou propaganda abusiva."
+                        )
+                    elif prob_spam >= THRESHOLD_SUSPEITO:
+                        st.warning(
+                            "⚠️ **Mensagem suspeita.**  \n"
+                            "Probabilidade intermediária de spam. Verifique com atenção antes de clicar em links ou responder."
+                        )
+                    else:
+                        st.success(
+                            "🍏 **Mensagem confiável (HAM).**  \n"
+                            "O modelo identificou padrões de uma comunicação legítima e segura."
+                        )
+
+                    st.caption(f"**Nota técnica — tradução enviada ao modelo:** *\"{texto_traduzido}\"*")
+
             except Exception as e:
                 st.error(f"Erro ao processar a mensagem: {e}")
